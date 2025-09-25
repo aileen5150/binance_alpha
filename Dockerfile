@@ -14,6 +14,7 @@ WORKDIR /app
 #ADD manifest/config /app/config/
 #ADD resource /app/resource/
 #ADD temp /app/temp/
+ADD config.json /app
 
 COPY --from=builder /app/app /app/app
 
