@@ -15,19 +15,19 @@ import (
 )
 
 type Airdrop struct {
-	Token           string `json:"token"`
-	Name            string `json:"name"`
-	Date            string `json:"date"`
-	Time            string `json:"time"`
-	Points          int    `json:"points"`  // 修复：改为 int 类型
-	Amount          string `json:"amount"`
-	Type            string `json:"type"`
-	Phase           int    `json:"phase"`
-	Status          string `json:"status"`
-	SystemTimestamp int64  `json:"system_timestamp"`
-	Completed       bool   `json:"completed"`
-	ContractAddress string `json:"contract_address"`
-	ChainID         string `json:"chain_id"`
+	Token           string      `json:"token"`
+	Name            string      `json:"name"`
+	Date            string      `json:"date"`
+	Time            string      `json:"time"`
+	Points          interface{} `json:"points"` // 修复：改为 int 类型
+	Amount          string      `json:"amount"`
+	Type            string      `json:"type"`
+	Phase           int         `json:"phase"`
+	Status          string      `json:"status"`
+	SystemTimestamp int64       `json:"system_timestamp"`
+	Completed       bool        `json:"completed"`
+	ContractAddress string      `json:"contract_address"`
+	ChainID         string      `json:"chain_id"`
 }
 
 type ApiResponse struct {
@@ -126,14 +126,15 @@ func getAirdrop() *ApiResponse {
 }
 
 // 获取token单价
-func fetchTokenPrice(token string) (float64, error) {
-	url := fmt.Sprintf("https://alpha123.uk/api/price/%s?t=%d&fresh=1", token, time.Now().UnixMilli())
+// 批量获取所有价格
+func fetchAllTokenPrices() (map[string]float64, error) {
+	url := "https://alpha123.uk/api/price/?batch=today"
 	client := &http.Client{}
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	// 设置必要的Header
+
 	req.Header.Set("accept", "*/*")
 	req.Header.Set("accept-language", "zh-CN,zh;q=0.9")
 	req.Header.Set("referer", "https://alpha123.uk/")
@@ -141,26 +142,50 @@ func fetchTokenPrice(token string) (float64, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer resp.Body.Close()
+
 	var result struct {
-		Success bool    `json:"success"`
-		Price   float64 `json:"price"`
+		Success bool `json:"success"`
+		Prices  map[string]struct {
+			Token    string  `json:"token"`
+			Price    float64 `json:"price"`
+			DexPrice float64 `json:"dex_price"`
+		} `json:"prices"`
 	}
+
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, err
+		return nil, err
 	}
+
 	if !result.Success {
-		return 0, fmt.Errorf("price fetch failed")
+		return nil, fmt.Errorf("batch price fetch failed")
 	}
-	return result.Price, nil
+
+	prices := make(map[string]float64)
+	for token, data := range result.Prices {
+		// 优先使用dex_price，如果为0则使用price
+		if data.DexPrice > 0 {
+			prices[token] = data.DexPrice
+		} else {
+			prices[token] = data.Price
+		}
+	}
+	return prices, nil
 }
 
 func getSendMsgAndSnapshot() (string, string) {
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	// 一次性获取所有价格
+	allPrices, err := fetchAllTokenPrices()
+	if err != nil {
+		fmt.Printf("获取价格失败: %v\n", err)
+		allPrices = make(map[string]float64)
 	}
 
 	apiResp := getAirdrop()
@@ -172,9 +197,14 @@ func getSendMsgAndSnapshot() (string, string) {
 	snapshot := ""
 	isEmpty := true
 	for i, item := range apiResp.Airdrops {
-		amount, err := strconv.Atoi(item.Amount)
-		if err != nil {
-			fmt.Printf("转换数量失败: %v\n", err)
+		var amount int
+		if item.Amount != "" {
+			amount, err = strconv.Atoi(item.Amount)
+			if err != nil {
+				fmt.Printf("转换数量失败: %v\n", err)
+				amount = 0
+			}
+		} else {
 			amount = 0
 		}
 		// 比较日期是否是今天
@@ -187,13 +217,24 @@ func getSendMsgAndSnapshot() (string, string) {
 			continue
 		}
 
-		price, err := fetchTokenPrice(item.Token)
-		if err != nil {
-			fmt.Printf("获取%s价格失败: %v\n", item.Token, err)
-			price = 0
+		// 改善价格获取错误处理
+		price := allPrices[item.Token] // 直接从map获取
+		fmt.Printf("单价: %v\n", price)
+
+		var points int
+		switch v := item.Points.(type) {
+		case string:
+			points, _ = strconv.Atoi(v)
+		case float64:
+			points = int(v)
+		case int:
+			points = v
+		default:
+			points = 0
 		}
-		msg += fmt.Sprintf("| %s(%s) | %s %s | %d | %s | %d | %.2f |\n",  // 修复：%d 替换 %s
-			item.Token, item.Name, item.Date, item.Time, item.Points, item.Amount, item.Phase, price*float64(amount))
+
+		msg += fmt.Sprintf("| %s(%s) | %s %s | %d | %s | %d | %.2f |\n", // 修复：%d 替换 %s
+			item.Token, item.Name, item.Date, item.Time, points, item.Amount, item.Phase, price*float64(amount))
 		snapshot += fmt.Sprintf("%s|%s|%s|%s|%s|%d\n",
 			item.Token, item.Name, item.Date, item.Time, item.Amount, item.Phase)
 		apiResp.Airdrops[i] = item
